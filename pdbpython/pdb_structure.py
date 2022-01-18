@@ -4,7 +4,6 @@ from typing import *
 import urllib3
 import time
 from collections import defaultdict
-from pdbpython.element_symbols import element_symbols_upper
 
 AMINO_ACID2LETTER = ["ala", "cys", "asp", "glu", "phe", "gly", "his", "ile", "lys", "leu", "met", "asn", "pyl", "pro",
                      "gln", "arg", "ser", "thr", "sec", "val", "trp", "tyr"]
@@ -14,7 +13,25 @@ class MissingResidueError(Exception):
     pass
 
 
-def query_website(request, max_trials=10):
+def query_website(request: str, max_trials: int = 10):
+    """A website specified in request is queried repeatedly until success or max_trails is exceeded.
+
+    Parameters
+    ----------
+    request: str
+        website plus query.
+    max_trials
+        maximum of trials.
+    Returns
+    -------
+        encoded string.
+    Raises
+    ______
+    ValueError
+        When the return code is equal to 404 the URL itself might be faulty. No repeats are executed.
+    ConnectionError
+        If after `max_trials` no successful connection was established.
+    """
     response = None
     for trial in range(max_trials):
         with urllib3.PoolManager() as pool:
@@ -30,6 +47,23 @@ def query_website(request, max_trials=10):
 
 
 class PDBAtom:
+    """ Contains information of an 'ATOM' or 'HETATM' line in a PDB file.
+
+    Direct creation of such an object is possible but not encouraged. Best practise is to create these objects from a
+    line in a PDB file with:
+        atom = PDBAtom.from_pdb_line(line)
+
+    Attributes
+    __________
+    line: str
+        reconstructed line from atom properties.
+    x: float
+        x-coordinate
+    y: float
+        y-coordinate
+    z: float
+        z-coordinate
+    """
     def __init__(self,
                  is_het: bool,
                  atom_id: int,
@@ -45,6 +79,27 @@ class PDBAtom:
                  element: str,
                  charge: Optional[str],
                  ):
+        """ Initializes the atom.
+
+        For the meaning of parameters please refer to:
+            www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
+
+        Parameters
+        ----------
+         is_het: bool
+         atom_id: int
+         atom_label: str
+         alt_pos: str
+         res_name: str
+         chain: str
+         res_id: int
+         coordinates: List[float]
+         occupancy: Optional[float]
+         temperature_factor: Optional[float]
+         segment_id: str
+         element: str
+         charge: Optional[str]
+        """
         self.is_het = is_het
         self.atom_id = atom_id
         self.atom_label = atom_label
@@ -136,8 +191,21 @@ class PDBAtom:
         return line
 
     @classmethod
-    def from_pdb_line(cls, line, check_line=True):
-        # http://www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
+    def from_pdb_line(cls, line: str, check_line: bool = True):
+        """Creates an PDBAtom object from a line in a PDBFile.
+
+        Parameters
+        __________
+        line: str
+            line of PDB file
+        check_line: bool
+            checks if reconstructed line of atoms is equal to input line. Will raise AssertionError otherwise.
+
+        References
+        __________
+        www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
+        """
+
         if line[:4] == "ATOM":
             is_het = False
         elif line[:6] == "HETATM":
