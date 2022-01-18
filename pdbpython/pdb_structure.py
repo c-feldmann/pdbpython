@@ -348,9 +348,11 @@ class PDBStructure:
         self._pdb_string = pdb_string
         self._extract_residues()
         self._extract_links()
+        self._extact_connections()
 
     def _extract_residues(self):
         self._residues: Dict[Tuple[str, int], PDBResidue] = dict()
+        self._atoms: Dict[int, PDBAtom] = dict()
         for line in self._pdb_string.split("\n"):
             if line[:4] != "ATOM" and line[:6] != "HETATM":
                 continue
@@ -362,11 +364,13 @@ class PDBStructure:
                 het = False
             if (chain, res_id) not in self._residues:
                 self._residues[(chain, res_id)] = PDBResidue(res_name, res_id, chain, het)
-            self._residues[(chain, res_id)].add_atom(PDBAtom.from_pdb_line(line, self.check_lines))
+            atom = PDBAtom.from_pdb_line(line, self.check_lines)
+            self._residues[(chain, res_id)].add_atom(atom)
 
     def _extract_links(self):
         links = []
         for line in self._pdb_string.split("\n"):
+            # TODO Make lines reproducible from properties
             if "LINK   " not in line[:8]:
                 continue
             # res = (chain, residue_id)
@@ -388,6 +392,42 @@ class PDBStructure:
             link_dict[r1_obj].add(r2_obj)
             link_dict[r2_obj].add(r1_obj)
         self.link_dict: Dict[PDBResidue, Set[PDBResidue]] = dict(link_dict)
+
+    def _extact_connections(self):
+        # TODO Make lines reproducible from properties
+        atom_dict = self.atom_dict
+        inter_res_bonds = defaultdict(set)
+        for line in self._pdb_string.split("\n"):
+            if line[:6] != "CONECT":
+                continue
+            line = "{:<80}".format(line)
+            atom = int(line[6:11].strip())
+            neighbor1 = line[11:16].strip()
+            neighbor2 = line[16:21].strip()
+            neighbor3 = line[21:26].strip()
+            neighbor4 = line[26:31].strip()
+            neighbor_list = [neighbor1, neighbor2, neighbor3, neighbor4]
+            neighbor_list = [int(neighbor) for neighbor in neighbor_list if neighbor]
+            atom_obj = atom_dict[atom]
+            res_of_atom = self._residues[(atom_obj.chain, atom_obj.res_id)]
+            for neighbor in neighbor_list:
+                neighbor_obj = atom_dict[neighbor]
+                res_of_neighbor = self._residues[(neighbor_obj.chain, neighbor_obj.res_id)]
+                if res_of_atom is res_of_neighbor:
+                    inter_res_bonds[atom_obj].add(neighbor_obj)
+                else:
+                    if res_of_atom not in self.link_dict:
+                        self.link_dict[res_of_atom] = set()
+                    self.link_dict[res_of_atom].add(res_of_neighbor)
+            self._inter_res_bonds: Dict[PDBAtom: Set[PDBAtom]] = {k: v for k, v in inter_res_bonds.items()}
+
+    @property
+    def atom_dict(self) -> Dict[int, PDBAtom]:
+        atom_dict = dict()
+        for res in self._residues.values():
+            for atom in res.atoms:
+                atom_dict[atom.atom_id] = atom
+        return atom_dict
 
     @property
     def het_res(self) -> List[PDBResidue]:
@@ -418,7 +458,7 @@ class PDBFile:
             for model_nr in range(self.max_model()):
                 model_nr += 1
                 try:
-                    self.models.append(self._extract_models(model_nr))
+                    self.models.append(self._extract_model(model_nr))
                 except MissingResidueError:
                     n_warns += 1
         else:
@@ -454,7 +494,7 @@ class PDBFile:
 
         return max(model_numbers)
 
-    def _extract_models(self, n=1):
+    def _extract_model(self, n=1) -> PDBStructure:
         if self.has_model() is False:
             raise ValueError("This PDB-file does not contain multiple models")
         else:
