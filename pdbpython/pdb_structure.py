@@ -4,6 +4,7 @@ from typing import *
 import urllib3
 import time
 from collections import defaultdict
+from pdbpython.element_symbols import element_symbols_upper
 
 AMINO_ACID2LETTER = ["ala", "cys", "asp", "glu", "phe", "gly", "his", "ile", "lys", "leu", "met", "asn", "pyl", "pro",
                      "gln", "arg", "ser", "thr", "sec", "val", "trp", "tyr"]
@@ -30,46 +31,174 @@ def query_website(request, max_trials=10):
 
 class PDBAtom:
     def __init__(self,
+                 is_het: bool,
                  atom_id: int,
-                 element: str,
-                 res_id: int,
+                 atom_label: str,
+                 alt_pos: str,
+                 res_name: str,
                  chain: str,
-                 coordinates: Tuple[float, float, float]):
+                 res_id: int,
+                 coordinates: List[float],
+                 occupancy: Optional[float],
+                 temperature_factor: Optional[float],
+                 segment_id: str,
+                 element: str,
+                 charge: Optional[str],
+                 ):
+        self.is_het = is_het
         self.atom_id = atom_id
-        self.symbol = element
-        self.res_id = res_id
+        self.atom_label = atom_label
+        self.alt_pos = alt_pos
+        self.res_name = res_name
         self.chain = chain
+        self.res_id = res_id
         self.coordinates = coordinates
+        self._occupancy = occupancy
+        self._temperature_factor = temperature_factor
+        self.segment_id = segment_id
+        self.element = element
+        self.charge = charge
+
         self._line = None
 
     @property
     def line(self):
-        if self._line:
-            return self._line
+        return self._reconstructed_line
+
+    @property
+    def x(self) -> float:
+        return self.coordinates[0]
+
+    @property
+    def y(self) -> float:
+        return self.coordinates[1]
+
+    @property
+    def z(self) -> float:
+        return self.coordinates[2]
+
+    @property
+    def occupancy(self) -> Optional[float]:
+        if self._occupancy or self._occupancy == 0:
+            return self._occupancy
+        return None
+
+    @property
+    def temperature_factor(self) -> Optional[float]:
+        if self._temperature_factor or self._temperature_factor == 0:
+            return self._temperature_factor
+        return None
+
+    @property
+    def _reconstructed_line(self):
+        if self.is_het:
+            lstart = "HETATM"
         else:
-            raise NotImplementedError("writing text from artificial atoms (not generated from PDB file) is not "
-                                      "supported yet!")
+            lstart = "ATOM  "
+
+        # http://www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
+        if len(self.atom_label) == 1:
+            atomlabel = f" {self.atom_label}  "
+        elif len(self.atom_label) == 2:
+            if self.atom_label.upper() == self.element.upper():
+                atomlabel = f"{self.atom_label}  "
+            else:
+                atomlabel = f" {self.atom_label} "
+        elif len(self.atom_label) <= 4:
+            atomlabel = "{:>4}".format(self.atom_label)
+        else:
+            raise IndexError(f"{self.atom_label} has more than 4 letters!")
+
+        if self._occupancy or self._occupancy == 0:
+            occ = "{:0.2f}".format(self._occupancy)
+        else:
+            occ = " "
+        if self._temperature_factor or self._temperature_factor == 0:
+            temperature_factor = "{:0.2f}".format(self._temperature_factor)
+        else:
+            temperature_factor = " "
+        fill_values = [lstart,
+                       str(self.atom_id),
+                       atomlabel,
+                       self.alt_pos,
+                       self.res_name,
+                       self.chain,
+                       self.res_id,
+                       "{:0.3f}".format(self.coordinates[0]),
+                       "{:0.3f}".format(self.coordinates[1]),
+                       "{:0.3f}".format(self.coordinates[2]),
+                       occ,
+                       temperature_factor,
+                       self.segment_id,
+                       self.element,
+                       self.charge]
+        line = "{}{:>5} {:<4}{:>1}{:>3}{:>2}{:>4}    {:>8}{:>8}{:>8}{:>6}{:>6}      {:<4}{:>2}{:>2}".format(*fill_values)
+        return line
 
     @classmethod
-    def from_pdb_line(cls, line):
+    def from_pdb_line(cls, line, check_line=True):
+        # http://www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
+        if line[:4] == "ATOM":
+            is_het = False
+        elif line[:6] == "HETATM":
+            is_het = True
+        else:
+            raise ValueError(f"Unknown format: {line[:7]}")
         atom_id = int(line[6:11].lstrip(" "))
-        atom_name = line[11:17].strip(" ")
+        atom_name = line[12:16].strip(" ")
+        alt_pos = line[16]
         res_name = line[17:20].strip(" ")
-        chain = line[20:22].strip(" ")
+        chain = line[21].strip(" ")
         res_id = int(line[22:26].strip(" "))
         x = float(line[30:38].strip(" "))
         y = float(line[38:46].strip(" "))
         z = float(line[46:54].strip(" "))
+        occ = line[54:60].strip(" ")
+        if occ:
+            occ = float(occ)
+        temperature_factor = line[60:66].strip(" ")
+        if temperature_factor:
+            temperature_factor = float(temperature_factor)
+        segment_id = line[72:76].strip(" ")
         element_symbol = line[76:78].strip(" ")
-        atom = cls(atom_id, element_symbol, res_id, chain, (x, y, z))
-        atom._line = line
+        charge = line[78:80].strip(" ")
+        atom = cls(is_het=is_het,
+                   atom_id=atom_id,
+                   atom_label=atom_name,
+                   alt_pos=alt_pos,
+                   res_name=res_name,
+                   chain=chain,
+                   res_id=res_id,
+                   coordinates=[x, y, z],
+                   occupancy=occ,
+                   temperature_factor=temperature_factor,
+                   segment_id=segment_id,
+                   element=element_symbol,
+                   charge=charge)
+        if atom.line != line and check_line:
+            if atom.line[:len(line)] != line:
+                print(atom._reconstructed_line)
+                print(line)
+                raise AssertionError
         return atom
 
 
 class PDBResidue:
     METAL_IDS = {"NA", "K", "MG", "CA", "MN", "FE", "FE2", "CO", "NI", "CU", "ZN"}
 
-    def __init__(self, name: str, res_id: int, chain: str, is_hetero: Optional[bool] = None):
+    def __init__(self,
+                 name: str,
+                 res_id: int,
+                 chain: str,
+                 is_hetero: Optional[bool] = None,
+                 ):
+        """ Object representing a PDB residue
+
+        :param name:
+        :param res_id:
+        :param chain:
+        :param is_hetero:
+        """
         self.name: str = name
         self.res_id: int = res_id
         self.chain: str = chain
@@ -86,9 +215,9 @@ class PDBResidue:
             raise ValueError("Atom and Residue must be in the same residue-ID! {}, {}".format(atom.res_id, self.res_id))
         self._atoms.append(atom)
 
-    def coordinates(self, no_hydrogen=True) -> List[Tuple[float, float, float]]:
+    def coordinates(self, no_hydrogen=True) -> List[List[float]]:
         if no_hydrogen:
-            return [atom.coordinates for atom in self._atoms if atom.symbol != "H"]
+            return [atom.coordinates for atom in self._atoms if atom.element != "H"]
         else:
             return [atom.coordinates for atom in self._atoms]
 
@@ -98,7 +227,7 @@ class PDBResidue:
 
     @property
     def block_str(self) -> str:
-        return "\n".join([a._line for a in self._atoms])
+        return "\n".join([a.line for a in self._atoms])
 
     @property
     def is_metal(self) -> bool:
@@ -118,9 +247,36 @@ class PDBResidue:
             text.append(atom.line)
         return "\n".join(text)
 
+    def remove_alternate_positions(self, keep="A"):
+        # Determininig duplicates
+        atom_counter = defaultdict(lambda: 0)
+        for atom in self.atoms:
+            atom_counter[atom.atom_label] += 1
+        atom_duplicates = [atom_label for atom_label, count in atom_counter.items() if count > 1]
+
+        new_atomlist = []
+        for atom in self.atoms:
+            if atom.atom_label in atom_duplicates:
+                if atom.alt_pos == keep:
+                    atom.alt_pos = " "
+                else:
+                    continue
+            elif atom.alt_pos != " ":
+                warnings.warn(f"Detected alternate position flag without corresponding alt pos for res {self.res_id}")
+                atom.alt_pos = " "
+            new_atomlist.append(atom)
+        self._atoms = new_atomlist
+        # Checking completeness
+        res_atom_labels = {atom.atom_label for atom in self._atoms}
+        lost_atoms = set(atom_counter.keys()) - res_atom_labels
+        if lost_atoms:
+            raise KeyError(f"Lost following atoms: {lost_atoms}")
+        return self
+
 
 class PDBStructure:
-    def __init__(self, pdb_string):
+    def __init__(self, pdb_string, check_lines=True):
+        self.check_lines = check_lines
         self._pdb_string = pdb_string
         self._extract_residues()
         self._extract_links()
@@ -138,7 +294,7 @@ class PDBStructure:
                 het = False
             if (chain, res_id) not in self._residues:
                 self._residues[(chain, res_id)] = PDBResidue(res_name, res_id, chain, het)
-            self._residues[(chain, res_id)].add_atom(PDBAtom.from_pdb_line(line))
+            self._residues[(chain, res_id)].add_atom(PDBAtom.from_pdb_line(line, self.check_lines))
 
     def _extract_links(self):
         links = []
@@ -177,12 +333,18 @@ class PDBStructure:
     def residue_dict(self) -> Dict[Tuple[str, int], PDBResidue]:
         return self._residues.copy()
 
+    def remove_alternate_positions(self, keep="A"):
+        for name, res in self._residues.items():
+            res.remove_alternate_positions(keep)
+        return self
+
 
 class PDBFile:
-    def __init__(self, pdb_id: str, pdb_content: str):
+    def __init__(self, pdb_id: str, pdb_content: str, check_lines=True):
         self.pdb_id: str = pdb_id
         self._pdb_file: str = pdb_content
         self.models: List[PDBStructure] = []
+        self.check_lines = check_lines
         n_warns = 0
         if self.has_model():
             for model_nr in range(self.max_model()):
@@ -192,7 +354,7 @@ class PDBFile:
                 except MissingResidueError:
                     n_warns += 1
         else:
-            self.models.append(PDBStructure(self.pdb_file))
+            self.models.append(PDBStructure(self.pdb_file, self.check_lines))
         if n_warns > 0:
             warnings.warn(f"Error in processing pdb id {self.pdb_id}. {n_warns} models were not load.")
         if not self.models:
@@ -246,10 +408,21 @@ class PDBFile:
             outfile.write(self.pdb_file)
 
     @classmethod
-    def from_file(cls, pdb_id, folder_path):
-        with open(os.path.join(folder_path, f"{pdb_id}.pdb")) as infile:
+    def from_file(cls, file_path: str, pdb_id: str, check_lines: bool = True):
+        """ Opens file in pdb format and returns a `PDBFile-object`
+        :param pdb_id: str
+            name or id of file
+        :param file_path: str
+            path to file
+        :param check_lines: bool
+            checking if reconstructed atom line equals input line.
+            (Some PDF files dont match the conventions, mild errors could be fixed.)
+        :return: PDBFile
+        """
+        with open(file_path) as infile:
             pdb_file = "".join(infile.readlines())
-        return cls(pdb_id, pdb_file)
+
+        return cls(pdb_id, pdb_file, check_lines)
 
     @classmethod
     def from_online(cls, pdb_id: str):
