@@ -72,6 +72,7 @@ class PDBAtom:
                  res_name: str,
                  chain: str,
                  res_id: int,
+                 icode: str,
                  coordinates: List[float],
                  occupancy: Optional[float],
                  temperature_factor: Optional[float],
@@ -107,6 +108,7 @@ class PDBAtom:
         self.res_name = res_name
         self.chain = chain
         self.res_id = res_id
+        self.icode = icode
         self.coordinates = coordinates
         self._occupancy = occupancy
         self._temperature_factor = temperature_factor
@@ -153,14 +155,22 @@ class PDBAtom:
 
         # http://www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
         if len(self.atom_label) == 1:
-            atomlabel = f" {self.atom_label}  "
+            atom_label = f" {self.atom_label}  "
         elif len(self.atom_label) == 2:
             if self.atom_label.upper() == self.element.upper():
-                atomlabel = f"{self.atom_label}  "
+                atom_label = f"{self.atom_label}  "
             else:
-                atomlabel = f" {self.atom_label} "
-        elif len(self.atom_label) <= 4:
-            atomlabel = "{:>4}".format(self.atom_label)
+                atom_label = f" {self.atom_label} "
+        elif len(self.atom_label) == 3:
+            # Undocumented feature of PDBe:
+            # If atom name is composite of element and int, padding differs
+            ele_len = len(self.element)
+            if self.atom_label[:ele_len] == self.element and self.atom_label[ele_len:].isdigit():
+                atom_label = "{:>2}{:<2}".format(self.atom_label[:ele_len], self.atom_label[ele_len:])
+            else:
+                atom_label = "{:>4}".format(self.atom_label)
+        elif len(self.atom_label) == 4:
+            atom_label = "{:>4}".format(self.atom_label)
         else:
             raise IndexError(f"{self.atom_label} has more than 4 letters!")
 
@@ -174,11 +184,12 @@ class PDBAtom:
             temperature_factor = " "
         fill_values = [lstart,
                        str(self.atom_id),
-                       atomlabel,
+                       atom_label,
                        self.alt_pos,
                        self.res_name,
                        self.chain,
                        self.res_id,
+                       self.icode,
                        "{:0.3f}".format(self.coordinates[0]),
                        "{:0.3f}".format(self.coordinates[1]),
                        "{:0.3f}".format(self.coordinates[2]),
@@ -187,7 +198,7 @@ class PDBAtom:
                        self.segment_id,
                        self.element,
                        self.charge]
-        line = "{}{:>5} {:<4}{:>1}{:>3}{:>2}{:>4}    {:>8}{:>8}{:>8}{:>6}{:>6}      {:<4}{:>2}{:>2}".format(*fill_values)
+        line = "{}{:>5} {:<4}{:>1}{:>3}{:>2}{:>4}{}   {:>8}{:>8}{:>8}{:>6}{:>6}      {:<4}{:>2}{:>2}".format(*fill_values)
         return line
 
     @classmethod
@@ -218,6 +229,7 @@ class PDBAtom:
         res_name = line[17:20].strip(" ")
         chain = line[21].strip(" ")
         res_id = int(line[22:26].strip(" "))
+        icode = line[26]
         x = float(line[30:38].strip(" "))
         y = float(line[38:46].strip(" "))
         z = float(line[46:54].strip(" "))
@@ -237,6 +249,7 @@ class PDBAtom:
                    res_name=res_name,
                    chain=chain,
                    res_id=res_id,
+                   icode=icode,
                    coordinates=[x, y, z],
                    occupancy=occ,
                    temperature_factor=temperature_factor,
@@ -316,6 +329,13 @@ class PDBResidue:
         return "\n".join(text)
 
     def remove_alternate_positions(self, keep="A"):
+        # Checking if alternate positions are available
+        for atom in self.atoms:
+            if atom.alt_pos != " ":
+                break
+        else:  # if no breaks
+            return self
+
         # Determininig duplicates
         atom_counter = defaultdict(lambda: 0)
         for atom in self.atoms:
@@ -338,6 +358,8 @@ class PDBResidue:
         res_atom_labels = {atom.atom_label for atom in self._atoms}
         lost_atoms = set(atom_counter.keys()) - res_atom_labels
         if lost_atoms:
+            print(self.res_id)
+            print(atom_counter.keys())
             raise KeyError(f"Lost following atoms: {lost_atoms}")
         return self
 
@@ -360,8 +382,6 @@ class PDBStructure:
             chain = line[20:22].strip(" ")
             res_id = int(line[22:26].strip(" "))
             het = line[:6] == "HETATM"
-            if res_name == "HOH":
-                het = False
             if (chain, res_id) not in self._residues:
                 self._residues[(chain, res_id)] = PDBResidue(res_name, res_id, chain, het)
             atom = PDBAtom.from_pdb_line(line, self.check_lines)
@@ -415,10 +435,14 @@ class PDBStructure:
                 res_of_neighbor = self._residues[(neighbor_obj.chain, neighbor_obj.res_id)]
                 if res_of_atom is res_of_neighbor:
                     inter_res_bonds[atom_obj].add(neighbor_obj)
+                    inter_res_bonds[neighbor_obj].add(atom_obj)
                 else:
                     if res_of_atom not in self.link_dict:
                         self.link_dict[res_of_atom] = set()
                     self.link_dict[res_of_atom].add(res_of_neighbor)
+                    if res_of_neighbor not in self.link_dict:
+                        self.link_dict[res_of_neighbor] = set()
+                    self.link_dict[res_of_neighbor].add(res_of_atom)
             self._inter_res_bonds: Dict[PDBAtom: Set[PDBAtom]] = {k: v for k, v in inter_res_bonds.items()}
 
     @property
@@ -550,6 +574,8 @@ def pdb_file_to_dict(pdb_file: PDBFile) -> List[Dict[str, Any]]:
     structure = pdb_file.models[0]
     dict_list = []
     for het_res in structure.het_res:
+        if het_res.name == "HOH":
+            continue
         ligand_dict = {"pdb_id": pdb_file.pdb_id,
                        "chain": het_res.chain,
                        "res_id": het_res.res_id,
@@ -560,6 +586,8 @@ def pdb_file_to_dict(pdb_file: PDBFile) -> List[Dict[str, Any]]:
 
         if het_res in structure.link_dict:
             for connected_res in structure.link_dict[het_res]:
+                if connected_res.name == "HOH":
+                    continue
                 if connected_res.is_metal:
                     ligand_dict["connected2metal"] = True
                 elif connected_res.is_hetero:
