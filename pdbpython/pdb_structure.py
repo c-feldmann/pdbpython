@@ -13,6 +13,10 @@ class MissingResidueError(Exception):
     pass
 
 
+class AtomIndexError(Exception):
+    pass
+
+
 def query_website(request: str, max_trials: int = 10):
     """A website specified in request is queried repeatedly until success or max_trails is exceeded.
 
@@ -167,6 +171,10 @@ class PDBAtom:
             ele_len = len(self.element)
             if self.atom_label[:ele_len] == self.element and self.atom_label[ele_len:].isdigit():
                 atom_label = "{:>2}{:<2}".format(self.atom_label[:ele_len], self.atom_label[ele_len:])
+
+            # why is this padded left?!
+            elif self.atom_label == "UNK":
+                atom_label = "UNK "
             else:
                 atom_label = "{:>4}".format(self.atom_label)
         elif len(self.atom_label) == 4:
@@ -428,10 +436,16 @@ class PDBStructure:
             neighbor4 = line[26:31].strip()
             neighbor_list = [neighbor1, neighbor2, neighbor3, neighbor4]
             neighbor_list = [int(neighbor) for neighbor in neighbor_list if neighbor]
-            atom_obj = atom_dict[atom]
+            try:
+                atom_obj = atom_dict[atom]
+            except KeyError:
+                raise AtomIndexError(f"Atom {atom} does not exists!")
             res_of_atom = self._residues[(atom_obj.chain, atom_obj.res_id)]
             for neighbor in neighbor_list:
-                neighbor_obj = atom_dict[neighbor]
+                try:
+                    neighbor_obj = atom_dict[neighbor]
+                except KeyError:
+                    raise AtomIndexError(f"Atom {neighbor} does not exists!")
                 res_of_neighbor = self._residues[(neighbor_obj.chain, neighbor_obj.res_id)]
                 if res_of_atom is res_of_neighbor:
                     inter_res_bonds[atom_obj].add(neighbor_obj)
@@ -475,7 +489,7 @@ class PDBFile:
     def __init__(self, pdb_id: str, pdb_content: str, check_lines=True):
         self.pdb_id: str = pdb_id
         self._pdb_file: str = pdb_content
-        self.models: List[PDBStructure] = []
+        self.models: List[Optional[PDBStructure]] = []
         self.check_lines = check_lines
         n_warns = 0
         if self.has_model():
@@ -483,7 +497,8 @@ class PDBFile:
                 model_nr += 1
                 try:
                     self.models.append(self._extract_model(model_nr))
-                except MissingResidueError:
+                except (MissingResidueError, AtomIndexError):
+                    self.models.append(None)
                     n_warns += 1
         else:
             self.models.append(PDBStructure(self.pdb_file, self.check_lines))
@@ -571,30 +586,39 @@ class PDBFile:
 
 
 def pdb_file_to_dict(pdb_file: PDBFile) -> List[Dict[str, Any]]:
-    structure = pdb_file.models[0]
-    dict_list = []
-    for het_res in structure.het_res:
-        if het_res.name == "HOH":
+    structure = None
+    for structure in pdb_file.models:
+        if not structure:
             continue
-        ligand_dict = {"pdb_id": pdb_file.pdb_id,
-                       "chain": het_res.chain,
-                       "res_id": het_res.res_id,
-                       "res_name": het_res.name,
-                       "connected2protein": False,
-                       "connected2ligand": False,
-                       "connected2metal": False}
+        else:
+            break
 
-        if het_res in structure.link_dict:
-            for connected_res in structure.link_dict[het_res]:
-                if connected_res.name == "HOH":
-                    continue
-                if connected_res.is_metal:
-                    ligand_dict["connected2metal"] = True
-                elif connected_res.is_hetero:
-                    ligand_dict["connected2ligand"] = True
-                else:
-                    ligand_dict["connected2protein"] = True
-        dict_list.append(ligand_dict)
+    dict_list = []
+    if structure:
+        for het_res in structure.het_res:
+            if het_res.name == "HOH":
+                continue
+            ligand_dict = {"pdb_id": pdb_file.pdb_id,
+                           "chain": het_res.chain,
+                           "res_id": het_res.res_id,
+                           "res_name": het_res.name,
+                           "connected2protein": False,
+                           "connected2ligand": False,
+                           "connected2metal": False}
+
+            if het_res in structure.link_dict:
+                for connected_res in structure.link_dict[het_res]:
+                    if connected_res.name == "HOH":
+                        continue
+                    if connected_res.is_metal:
+                        ligand_dict["connected2metal"] = True
+                    elif connected_res.is_hetero:
+                        ligand_dict["connected2ligand"] = True
+                    else:
+                        ligand_dict["connected2protein"] = True
+            dict_list.append(ligand_dict)
+    else:
+        warnings.warn(f"No valid model for {pdb_file.pdb_id}")
 
     if not dict_list:
         dict_list = [{"pdb_id": pdb_file.pdb_id,
