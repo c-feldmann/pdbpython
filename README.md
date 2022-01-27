@@ -9,9 +9,11 @@ at own risk.
 ### PDBFile
 The class PDBFile is initialized with `pdb_id` (str, an identifier for the file) and `pdb_content` (str, the content of 
 a PDB-file). In default `check_lines` (bool) is set to `True`, which will raise an `AssertionError` if the reconstructed
-line for an atom differs from the original line. In some cases PDB files created by third party software may differ
-slightly in padding, which will still raise an error. After reviewing differences you can suppress the error  with
-setting `check_lines` to `False`.
+line for an atom differs from the original line (alignment of atom label is allowed to differ).
+After reviewing differences you can suppress the error  with
+setting `check_lines` to `False`.  
+The CONNECT info in PDB-files is often referencing atoms not present in the file. When setting `allow_connect_errors` 
+to `False` these errors are ignored.
 #### Constructing a PDBFile object from online database or file.
 The class PDBFile can also be constructed from a file:
 ```python

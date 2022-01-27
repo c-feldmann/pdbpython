@@ -158,29 +158,26 @@ class PDBAtom:
             lstart = "ATOM  "
 
         # http://www.wwpdb.org/documentation/file-format-content/format33/sect9.html#ATOM
-        if len(self.atom_label) == 1:
-            atom_label = f" {self.atom_label}  "
-        elif len(self.atom_label) == 2:
-            if self.atom_label.upper() == self.element.upper():
-                atom_label = f"{self.atom_label}  "
-            else:
-                atom_label = f" {self.atom_label} "
-        elif len(self.atom_label) == 3:
-            # Undocumented feature of PDBe:
-            # If atom name is composite of element and int, padding differs
-            ele_len = len(self.element)
-            if self.atom_label[:ele_len] == self.element and self.atom_label[ele_len:].isdigit():
-                atom_label = "{:>2}{:<2}".format(self.atom_label[:ele_len], self.atom_label[ele_len:])
+        element_len = len(self.element)
+        assumed_element_part = self.atom_label[:element_len]
+        remaining_part = self.atom_label[element_len:]
+        #if len(self.atom_label) == 1:
+        #    atom_label = f" {self.atom_label}  "
 
-            # why is this padded left?!
-            elif self.atom_label == "UNK":
-                atom_label = "UNK "
-            else:
-                atom_label = "{:>4}".format(self.atom_label)
-        elif len(self.atom_label) == 4:
+        # If len == 4 no other choice for padding. Therefore checked first
+        if len(self.atom_label) == 4:
             atom_label = "{:>4}".format(self.atom_label)
+        # If smaller than 4 check if composite of element and label
+        elif len(self.atom_label) < 4 and assumed_element_part.upper() == self.element.upper():
+            atom_label = "{:>2}{:<2}".format(assumed_element_part, remaining_part)
+        elif len(self.atom_label) == 3:
+            atom_label = "{:>4}".format(self.atom_label)
+        elif len(self.atom_label) == 2:  # Middle Padding
+            atom_label = f" {self.atom_label} "
+        elif len(self.atom_label) == 1:  # len(label) and not element only occured so far only in 5c53 atom idx 14605
+            atom_label = f" {self.atom_label}  "
         else:
-            raise IndexError(f"{self.atom_label} has more than 4 letters!")
+            raise IndexError(f"The label '{self.atom_label}' of atom {self.atom_id} has more than 4 letters!")
 
         if self._occupancy or self._occupancy == 0:
             occ = "{:0.2f}".format(self._occupancy)
@@ -264,11 +261,15 @@ class PDBAtom:
                    segment_id=segment_id,
                    element=element_symbol,
                    charge=charge)
-        if atom.line != line and check_line:
-            if atom.line[:len(line)] != line:
-                print(atom._reconstructed_line)
-                print(line)
-                raise AssertionError
+        # I give up. Padding of atom label is inconsistent from time to time. Exclude this part.
+        part1_bad = line[:11] != atom.line[:11]
+        label_bad = line[12:16].strip(" ") != atom.line[12:16].strip(" ")
+        part2_bad = line[16].rstrip(" ") != atom.line[16].rstrip(" ")
+
+        if part1_bad or label_bad or part2_bad:
+            print(atom._reconstructed_line)
+            print(line)
+            raise AssertionError
         return atom
 
 
@@ -373,12 +374,18 @@ class PDBResidue:
 
 
 class PDBStructure:
-    def __init__(self, pdb_string, check_lines=True):
+    def __init__(self, pdb_string, check_lines=True, allow_connect_errors=False):
         self.check_lines = check_lines
         self._pdb_string = pdb_string
         self._extract_residues()
         self._extract_links()
-        self._extact_connections()
+        try:
+            self._extact_connections()
+        except AtomIndexError as err:
+            if allow_connect_errors:
+                warnings.warn(str(err))
+            else:
+                raise err
 
     def _extract_residues(self):
         self._residues: Dict[Tuple[str, int], PDBResidue] = dict()
@@ -486,7 +493,7 @@ class PDBStructure:
 
 
 class PDBFile:
-    def __init__(self, pdb_id: str, pdb_content: str, check_lines=True):
+    def __init__(self, pdb_id: str, pdb_content: str, check_lines=True, allow_connect_errors=False):
         self.pdb_id: str = pdb_id
         self._pdb_file: str = pdb_content
         self.models: List[Optional[PDBStructure]] = []
@@ -501,9 +508,10 @@ class PDBFile:
                     self.models.append(None)
                     n_warns += 1
         else:
-            self.models.append(PDBStructure(self.pdb_file, self.check_lines))
+            self.models.append(PDBStructure(self.pdb_file, self.check_lines, allow_connect_errors=allow_connect_errors))
         if n_warns > 0:
-            warnings.warn(f"Error in processing pdb id {self.pdb_id}. {n_warns} models were not load.")
+            warnings.warn(f"Error in processing pdb id {self.pdb_id}. {n_warns} of {self.max_model()} models "
+                          f"were not loaded.")
         if not self.models:
             raise ValueError("No valid structure was extracted.")
 
@@ -555,7 +563,8 @@ class PDBFile:
             outfile.write(self.pdb_file)
 
     @classmethod
-    def from_file(cls, file_path: str, pdb_id: str, check_lines: bool = True):
+    def from_file(cls, file_path: str, pdb_id: str, check_lines: bool = True,
+                  allow_connect_errors=False):
         """ Opens file in pdb format and returns a `PDBFile-object`
         :param pdb_id: str
             name or id of file
@@ -569,20 +578,21 @@ class PDBFile:
         with open(file_path) as infile:
             pdb_file = "".join(infile.readlines())
 
-        return cls(pdb_id, pdb_file, check_lines)
+        return cls(pdb_id, pdb_file, check_lines, allow_connect_errors=allow_connect_errors)
 
     @classmethod
-    def from_online(cls, pdb_id: str):
+    def from_online(cls, pdb_id: str, check_lines: bool = True, allow_connect_errors=False):
         pdb_id = pdb_id.lower()
         url = f"https://www.ebi.ac.uk/pdbe/entry-files/pdb{pdb_id}.ent"
-        return cls(pdb_id, query_website(url).decode('ascii'))
+        return cls(pdb_id, query_website(url).decode('ascii'), allow_connect_errors=allow_connect_errors,
+                   check_lines=check_lines)
 
     @classmethod
-    def from_file_or_online(cls, pdb_id, folder_path):
+    def from_file_or_online(cls, pdb_id, folder_path, allow_connect_errors=False):
         if os.path.isfile(os.path.join(folder_path, f"{pdb_id}.pdb")):
-            return cls.from_file(pdb_id, folder_path)
+            return cls.from_file(pdb_id, folder_path, allow_connect_errors=allow_connect_errors)
         else:
-            return cls.from_online(pdb_id)
+            return cls.from_online(pdb_id, allow_connect_errors=allow_connect_errors)
 
 
 def pdb_file_to_dict(pdb_file: PDBFile) -> List[Dict[str, Any]]:
